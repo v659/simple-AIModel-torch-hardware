@@ -180,24 +180,34 @@ def train(steps=2000):
         optimizer.step()
 
         if step % 1 == 0:
-            print(f"Step {step:04d} | Loss: {loss.item():.4f}")
-            prompt = clean(dataset[random.randint(0, len(dataset))]["text"])
-            prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokenize(prompt)]],
+            while True:
+                prompt = clean(dataset[random.randint(0, len(dataset) - 1)]["text"])
+                tokens = tokenize(prompt)
+                if tokens:
+                    break  # found a non-empty prompt
+
+            prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokens]],
                                       device=device, dtype=torch.long)
             out = model.generate(prompt_ids, 30, temperature=0.8)[0].tolist()
             print("Generated:", decode(out))
+
 
         # ✅ Save only if current loss is better than previous best
         if loss.item() < best_loss:
             best_loss = loss.item()
             torch.save(model.state_dict(), model_path)
             print(f"📉 New best loss: {best_loss:.4f} — model saved!")
-            prompt = clean(dataset[random.randint(0, len(dataset))]["text"])
-            prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokenize(prompt)]],
-                                      device=device, dtype=torch.long)
+            while True:
+                prompt = clean(dataset[random.randint(0, len(dataset) - 1)]["text"])
+                tokens = tokenize(prompt)
+                if tokens:
+                    break  # found a non-empty prompt
 
+            prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokens]],
+                                      device=device, dtype=torch.long)
             out = model.generate(prompt_ids, 30, temperature=0.8)[0].tolist()
             print("Generated:", decode(out))
+
 
     print(f"✅ Training done. Best loss: {best_loss:.4f}")
 
