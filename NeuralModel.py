@@ -189,7 +189,7 @@ def train(steps=2000):
             prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokens]],
                                       device=device, dtype=torch.long)
             out = model.generate(prompt_ids, 30, temperature=0.8)[0].tolist()
-            print("Generated:", decode(out))
+            print("Generated:", decode(out), "Loss: {best_loss:.4f")
 
 
         # ✅ Save only if current loss is better than previous best
