@@ -15,15 +15,16 @@ try:
 except:
     pass
 
-
 # === Config ===
 block_size = 32
 batch_size = 64
 n_embd = 128
 n_head = 4
 n_layer = 4
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "mps"
 model_path = os.path.expanduser("~/Desktop/word_transformer.pt")
+checkpoint_path = model_path + ".ckpt"
+
 
 # === Tokenizer ===
 def clean(text):
@@ -112,7 +113,6 @@ class TransformerModel(nn.Module):
 
     @staticmethod
     def top_p_filtering(logits, top_p=0.9, filter_value=-float("Inf")):
-        """Nucleus (top-p) filtering"""
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
@@ -128,12 +128,23 @@ class TransformerModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, x, max_new_tokens=50, temperature=1.0, top_k=None, top_p=None, repetition_penalty=1.2):
+        """
+        Generates a sequence of tokens from the given input prompt using the Transformer model.
+
+        :param x: Tensor of shape (B, T), input token indices (prompt), where B is batch size and T is sequence length.
+        :param max_new_tokens: int, number of tokens to generate after the prompt.
+        :param temperature: float, value > 0 to scale logits before sampling (lower = more confident predictions).
+        :param top_k: int or None, if set, restricts sampling to top-k most probable tokens.
+        :param top_p: float or None, if set, uses nucleus (top-p) sampling for probabilistic token filtering.
+        :param repetition_penalty: float, penalty factor for previously generated tokens to reduce repetition.
+        :return: Tensor of shape (B, T + max_new_tokens), the input prompt followed by generated tokens.
+        """
         generated = x.clone()
         for _ in range(max_new_tokens):
             x_cond = generated[:, -block_size:] if generated.size(1) > block_size else generated
             logits = self(x_cond)
             logits = logits[:, -1, :] / temperature  # (B, vocab)
-
+            logits = logits.clone()
             for b in range(generated.size(0)):
                 # Apply repetition penalty
                 for token_id in generated[b].tolist():
@@ -149,6 +160,7 @@ class TransformerModel(nn.Module):
                     logits[b] = self.top_p_filtering(logits[b], top_p)
 
             probs = F.softmax(logits, dim=-1)
+
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
 
@@ -166,50 +178,48 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
 
 def decode(ids): return " ".join(idx_to_word.get(i, "<unk>") for i in ids)
 
-def train(steps=2000):
+def train(steps=2000, start_step=0, best_loss=float('inf')):
     model.train()
-    best_loss = float('inf')  # ✅ Initialize once, outside the loop
 
-    for step in range(steps):
+    for step in range(start_step, start_step + steps):
         xb, yb = get_batch()
-        with torch.autocast(device_type='cpu', dtype=torch.bfloat16, enabled=True):
+
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits = model(xb)
-        loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
+            loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        if step % 1 == 0:
+        # Generate output every step (you can change to every 100 steps if needed)
+        if step % 200 == 0:
             while True:
                 prompt = clean(dataset[random.randint(0, len(dataset) - 1)]["text"])
                 tokens = tokenize(prompt)
                 if tokens:
-                    break  # found a non-empty prompt
+                    break
 
             prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokens]],
                                       device=device, dtype=torch.long)
             out = model.generate(prompt_ids, 30, temperature=0.8)[0].tolist()
-            print("Generated:", decode(out), f"Loss: {best_loss:.4f}")
+            print("Generated:", decode(out), f"Loss: {loss:.4f}")
 
-
-        # ✅ Save only if current loss is better than previous best
+        # Save best model and always checkpoint
         if loss.item() < best_loss:
             best_loss = loss.item()
             torch.save(model.state_dict(), model_path)
             print(f"📉 New best loss: {best_loss:.4f} — model saved!")
-            while True:
-                prompt = clean(dataset[random.randint(0, len(dataset) - 1)]["text"])
-                tokens = tokenize(prompt)
-                if tokens:
-                    break  # found a non-empty prompt
 
-            prompt_ids = torch.tensor([[word_to_idx.get(w, word_to_idx["<unk>"]) for w in tokens]],
-                                      device=device, dtype=torch.long)
-            out = model.generate(prompt_ids, 30, temperature=0.8)[0].tolist()
-            print("Generated:", decode(out))
-
+        torch.save({
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "step": step + 1,  # save next step
+            "best_loss": best_loss,
+        }, checkpoint_path)
 
     print(f"✅ Training done. Best loss: {best_loss:.4f}")
+
 
 
 def load_and_generate(prompt):
@@ -225,13 +235,48 @@ def load_and_generate(prompt):
         print("Generated:", decode(out))
 
 
-# === Entry point ===
-if __name__ == "__main__":
-    if os.path.exists(model_path):
-        print("🔁 Training from existing model")
-        model.load_state_dict(torch.load(model_path, map_location=device))
-    else:
-        print("🆕 Training from scratch")
+"""# === Emergency Save Script ===
+if "model" in globals() and "optimizer" in globals():
+    print("🧠 Saving model + optimizer state manually...")
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "step": 1348,  # <-- Replace with your current known step
+        "best_loss": 1.4141,  # <-- Replace if known
+    }, checkpoint_path)
+    print(f"✅ Saved to {checkpoint_path}")
+else:
+    print("⚠️ model or optimizer not found in memory. Cannot save.")"""
 
-    train(steps=20000)
 
+
+# === Instantiate model + optimizer before loading checkpoint ===
+model = TransformerModel().to(device)
+try:
+    model = torch.compile(model)
+except:
+    pass
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+
+# === Then load checkpoint ===
+if os.path.exists(checkpoint_path):
+    print("🔁 Resuming from checkpoint...")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    start_step = checkpoint["step"]
+    best_loss = checkpoint["best_loss"]
+    print(best_loss, start_step)
+elif os.path.exists(model_path):
+    print("🔁 Loading existing model (no optimizer state)")
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    start_step = 0
+    best_loss = float("inf")
+else:
+    print("🆕 Training from scratch")
+    start_step = 0
+    best_loss = float("inf")
+
+# ✅ Start training regardless of where we resumed from
+train(steps=20000, start_step=start_step, best_loss=best_loss)
